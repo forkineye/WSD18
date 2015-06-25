@@ -24,8 +24,9 @@
 /* USER Defined Defaults                         */
 /*************************************************/
 #define CHANNEL_START 0             /* default start channel */
+#define CHANNEL_COUNT 18            /* total number of channels to listen for - MAX 18 */
 #define NRF_CHANNEL 100             /* default nRF channel */
-#define NRF_RATE    XNRF_250KBPS    /* default nRF data rate */
+#define NRF_RATE    XNRF_1MBPS      /* default nRF data rate */
 
 
 /*************************************************/
@@ -54,7 +55,7 @@
 #define RFSC_FRAME  30  /* Offset for FRAME byte in RFSC Protocol */
 #define RFSC_CMD    31  /* Offset for COMMAND byte - proposed */ 
 
-/* Pin configuration for FloodBrain
+/* Channel Pin Map
  *    PA0  ........ CH1
  *    PA1  ........ CH2
  *    PA2  ........ CH3
@@ -63,15 +64,6 @@
  *    PA5  ........ CH6
  *    PA6  ........ CH7
  *    PA7  ........ CH8
- *
- *    PC0  ........ STATUS LED
- *    PC1  ........ DATA LED
- *    PC2  ........ NRF IRQ
- *    PC3  ........ NRF CE
- *    PC4  ........ NRF SEL
- *    PC5  ........ NRF SCLK
- *    PC6  ........ MISO/RX
- *    PC7  ........ MOSI/TX
  *
  *    PD0  ........ CH9
  *    PD1  ........ CH10
@@ -88,7 +80,7 @@
  */
 
 // port definitions
-#define NUM_CHANNELS 18
+#define CHANNEL_MAX 18
 
 #define PWM_BITOP &= ~
 

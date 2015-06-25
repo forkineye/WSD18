@@ -1,5 +1,5 @@
 /*
- * PixelStick.c
+ * WSD18.c
  *
  * Project: PixelStick
  * Copyright (c) 2014 Shelby Merrick
@@ -24,12 +24,12 @@
 #include <stdbool.h>
 #include "XNRF24L01/XNRF24L01.h"
 
-#define STATUS_LED_ON   PORTC.OUTSET = PIN0_bm
-#define STATUS_LED_OFF  PORTC.OUTCLR = PIN0_bm
-#define STATUS_LED_TGL  PORTC.OUTTGL = PIN0_bm
-#define DATA_LED_ON     PORTC.OUTSET = PIN1_bm
-#define DATA_LED_OFF    PORTC.OUTCLR = PIN1_bm
-#define DATA_LED_TGL    PORTC.OUTTGL = PIN1_bm
+#define LED_STATUS_ON   PORTC.OUTSET = PIN0_bm
+#define LED_STATUS_OFF  PORTC.OUTCLR = PIN0_bm
+#define LED_STATUS_TGL  PORTC.OUTTGL = PIN0_bm
+#define LED_DATA_ON     PORTC.OUTSET = PIN1_bm
+#define LED_DATA_OFF    PORTC.OUTCLR = PIN1_bm
+#define LED_DATA_TGL    PORTC.OUTTGL = PIN1_bm
 
 /* XSPI configuration structure */
 xspi_config_t xspi_config = {
@@ -57,12 +57,11 @@ xnrf_config_t xnrf_config = {
 uint64_t            addr_p0 = ADDR_P0;      /* Default nRF address for TX and Pipe 0 RX */
 uint64_t            addr_p1 = ADDR_P1;      /* Default nRF address for Pipe 1 RX */
 volatile uint8_t    rxbuff[32];             /* Packet buffer */
-volatile bool       DFLAG = false;          /* Data ready flag */
-uint8_t             compare[NUM_CHANNELS];  /* Channel data for PWM */
-volatile uint8_t    compbuff[NUM_CHANNELS]; /* Buffer to feed PWM data */
-volatile uint16_t   channel_start;          /* Start channel for this PixelStick */
+volatile uint8_t    unibuff[512];           /* Universe buffer */
+uint8_t             compare[CHANNEL_MAX];   /* Channel data for PWM */
+volatile uint8_t    compbuff[CHANNEL_MAX];  /* Buffer to feed PWM data */
+volatile uint16_t   channel_start;          /* Start channel for this controller */
 volatile uint16_t   channel_count;          /* Total number of channels */
-
 
 /* Initialize the board */
 void init() {
@@ -77,20 +76,43 @@ void init() {
 
     // Configure General IO
     PORTC.DIRSET = PIN0_bm | PIN1_bm;
-    STATUS_LED_OFF;
-    DATA_LED_OFF;
+    LED_STATUS_OFF;
+    LED_DATA_OFF;
 
     //TODO: Load configuration from EEPROM here. For now, use defaults from config.h
     uint8_t nrf_channel = NRF_CHANNEL;
     uint8_t nrf_rate = NRF_RATE;
-    channel_start = CHANNEL_START;
-    channel_count = NUM_CHANNELS;
+    channel_start = CHANNEL_START - 1;  /* 0 based */
+    if (CHANNEL_COUNT > CHANNEL_MAX)
+        channel_count = CHANNEL_MAX;
+    else
+        channel_count = CHANNEL_COUNT;
 
+    // Configure the DMA controller
+    EDMA.CTRL = 0;                      /* Disable EDMA controller so we can update it */
+    EDMA.CTRL = EDMA_RESET_bm;          /* Reset the EDMA controller */
+    EDMA.CTRL = EDMA_CHMODE_STD02_gc;   /* Configure for 2 standard channels (CH0 and CH2) */
+    EDMA.CTRL |= EDMA_ENABLE_bm;        /* Enable the EDMA controller */
+    
+    // Configure DMA Standard Channel 0 for rxbuff to unibuff transfer */
+    EDMA.CH0.ADDRCTRL = EDMA_CH_RELOAD_TRANSACTION_gc | EDMA_CH_DIR_INC_gc; /* Increment source pointer during transfer and reset after transaction */
+    EDMA.CH0.DESTADDRCTRL = EDMA_CH_DIR_INC_gc;                             /* Increment destination pointer during transfer */
+    EDMA.CH0.TRFCNT = 30;                                                   /* Transfer 30 bytes per transaction */
+    EDMA.CH0.ADDR = (uint16_t)rxbuff;                                       /* Source address is rxbuff[] */
+    EDMA.CH0.DESTADDR = (uint16_t)unibuff;                                  /* Destination address is unibuff[] */
+    
+    // Configure DMA Standard Channel 2 for unibuff to compbuff transfer */
+    EDMA.CH2.ADDRCTRL = EDMA_CH_RELOAD_TRANSACTION_gc | EDMA_CH_DIR_INC_gc; /* Increment source pointer during transfer and reset after transaction */
+    EDMA.CH2.DESTADDRCTRL = EDMA_CH_DIR_INC_gc;                             /* Increment destination pointer during transfer */
+    EDMA.CH2.TRFCNT = channel_count;                                        /* Transfer channel_count bytes per transaction */
+    EDMA.CH2.ADDR = (uint16_t)unibuff + channel_start;                      /* Source address is rxbuff[] + channel_start */
+    EDMA.CH2.DESTADDR = (uint16_t)compbuff;                                 /* Destination address is compbuff[] */
+    
     // Setup PWM outputs and initialize buffers
     PORTA.DIR = 0xFF;   /* Channels 1-8 */
     PORTD.DIR = 0xFF;   /* Channels 9-16 */
     PORTR.DIR = 0x03;   /* Channels 17 & 18 */
-    for (uint8_t i=0; i<NUM_CHANNELS; i++) {
+    for (uint8_t i=0; i<CHANNEL_MAX; i++) {
         compare[i] = 0;
         compbuff[i] = 0;
     }
@@ -112,18 +134,15 @@ void init() {
     xnrf_set_rx1_address(&xnrf_config, (uint8_t*)&addr_p1); /* Set Pipe 1 address */
 
     // Setup pin change interrupt handling for the nRF on PC3
-    PORTC_PIN3CTRL = PORT_ISC_FALLING_gc;   /* Setup PC3 to sense falling edge */
-    PORTC.INTMASK = PIN3_bm;                /* Enable pin change interrupt for PC3 */
-    PORTC.INTCTRL = PORT_INTLVL_LO_gc;      /* Set Port C for low level interrupts */
-    PMIC.CTRL |= PMIC_LOLVLEN_bm;           /* Enable low interrupts */
+    PORTC_PIN3CTRL = PORT_ISC_FALLING_gc;               /* Setup PC3 to sense falling edge */
+    PORTC.INTMASK = PIN3_bm;                            /* Enable pin change interrupt for PC3 */
+    PORTC.INTCTRL = PORT_INTLVL_LO_gc;                  /* Set Port C for low level interrupts */
+    PMIC.CTRL |= PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm;    /* Enable low level and medium interrupts */
 
     // Initialize listening on nRF.
     xnrf_config_rx(&xnrf_config);   /* Configure nRF for RX mode */
     xnrf_powerup(&xnrf_config);     /* Power-up the nRF */
     _delay_ms(5);                   /* Let the radio stabilize - Section 6.1.7 - Tpd2stdby */
-    
-    // Enable interrupts and start PWM timer
-    PMIC.CTRL |= PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm;    /* Enable low level interrupts */
     
     // Enable global interrupts, timer and start listening
     sei();                              /* Enable global interrupt flag */
@@ -140,7 +159,7 @@ ISR(TCC4_OVF_vect) {
     PORTA.OUT = portlevelA;
     PORTD.OUT = portlevelD;
     PORTR.OUT = portlevelR;
-    // unrolled for speed -- process for NUM_CHANNELS
+    // unrolled for speed -- process for CHANNEL_MAX
     if (++softcount == 0) {
         compare[0] = compbuff[0];
         compare[1] = compbuff[1];
@@ -191,30 +210,32 @@ ISR(TCC4_OVF_vect) {
 
 /* Interrupt handler for nRF hardware interrupt on PC3 */
 ISR(PORTC_INT_vect) {
-    DATA_LED_ON;
-    xnrf_read_payload(&xnrf_config, rxbuff, xnrf_config.payload_width);     /* Retrieve the payload */
-    xnrf_write_register(&xnrf_config, NRF_STATUS, (1 << RX_DR));            /* Reset the RX_DR status */
-    PORTC.INTFLAGS |= PIN3_bm;                                              /* Clear interrupt flag for PC3 */
-    DFLAG = true;                                                           /* Set out data ready flag */
-    DATA_LED_OFF;
+    LED_DATA_ON;
+    xnrf_read_payload(&xnrf_config, rxbuff, xnrf_config.payload_width); /* Retrieve the payload */
+    xnrf_write_register(&xnrf_config, NRF_STATUS, (1 << RX_DR));        /* Reset nRF RX_DR status */
+
+    //TODO: Add check for command byte
+    EDMA.CH0.DESTADDR = (uint16_t)unibuff +
+            (rxbuff[RFSC_FRAME] * RFSC_FRAME);                  /* Set DMA CH0 destination address to correct offset for this frame */
+    EDMA.CH0.CTRLA |= EDMA_CH_ENABLE_bm | EDMA_CH_TRFREQ_bm;    /* Enable and trigger DMA channel 0 */
+    PORTC.INTFLAGS = PIN3_bm;                                   /* Clear interrupt flag for PC3 */
+
+    LED_DATA_OFF;    
 }
 
 /* Main Loop */
 int main(void) {
-    /* Let the power supply stabilize */
-    _delay_ms(100);
-    
     /* Initialize everything */
     init();
 
-    STATUS_LED_ON;
+    LED_STATUS_ON;
     while(1) {
-        while(!DFLAG);  /* Spin our wheels until we have a packet */
-        DFLAG = false;  /* and reset out flag */
+        //TODO:  Polling for now. Move to interrupt?
+        while(!(EDMA.CH0.CTRLB & EDMA_CH_TRNIF_bm));                /* Wait until we have a packet transfered into unibuff */
+        EDMA.CH0.CTRLB |= EDMA_CH_TRNIF_bm;                         /* Clear the Transaction Complete interrupt flag */
+//        EDMA.CH2.CTRLA |= EDMA_CH_ENABLE_bm | EDMA_CH_TRFREQ_bm;    /* Enable and trigger DMA channel 2 for copy to compbuff */
 
-        //TODO: Just copying first 18 channels from packet for now.  Will set for config soon. */
-        if(rxbuff[30] == 0)   /* Offset for packet, this is the one we want for now */
-            for(uint8_t i=0; i < NUM_CHANNELS; i++)
-                compbuff[i] = rxbuff[i];
-    }
+         for(uint8_t i=0; i < channel_count; i++)
+             compbuff[i] = unibuff[i + channel_start];
+     }        
 }
